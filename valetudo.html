@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>Valetudo to VMF</title>
+    <style>
+        * {
+            padding: 0;
+        }
+
+        .output {
+            display: flex;
+        }
+
+        .output>div {
+            flex: 1;
+            padding: 2px;
+        }
+    </style>
+    <script src="imagetracer_v1.2.6.js"></script>
+    <script src="simplify.js"></script>
+    <script src="earcut.min.js"></script>
+</head>
+
+<body>
+    <div class="center">
+        <div>
+            <input type="file" id="inputmap" name="inputmap" />
+        </div>
+        <div class="output">
+            <div>
+                <canvas id="pixelmap" width="500" height="500"></canvas>
+            </div>
+            <div>
+                <div id="svgcontainer" width="500" height="500"></div>
+            </div>
+            <div>
+                <div id="simple_svgcontainer" width="500" height="500"></div>
+            </div>
+        </div>
+        <div>
+            <button type="button" id="download_vmf_btn" disabled>Download VMF</button>
+        </div>
+    </div>
+    <script>
+        var pixelmap = document.getElementById('pixelmap');
+
+        var pixelmap_width = pixelmap.getAttribute("width");
+        var pixelmap_height = pixelmap.getAttribute("height");
+
+        var pixelctx = pixelmap.getContext('2d');
+
+        pixelctx.fillStyle = "rgb(0, 0, 0);";
+        pixelctx.fillRect(0, 0, pixelmap.width, pixelmap.height);
+
+        // https://martin.ankerl.com/2009/12/09/how-to-create-random-colors-programmatically/
+        function HSVtoRGB(h, s, v) {
+            var r, g, b, i, f, p, q, t;
+            if (arguments.length === 1) {
+                s = h.s, v = h.v, h = h.h;
+            }
+            i = Math.floor(h * 6);
+            f = h * 6 - i;
+            p = v * (1 - s);
+            q = v * (1 - f * s);
+            t = v * (1 - (1 - f) * s);
+            switch (i % 6) {
+                case 0: r = v, g = t, b = p; break;
+                case 1: r = q, g = v, b = p; break;
+                case 2: r = p, g = v, b = t; break;
+                case 3: r = p, g = q, b = v; break;
+                case 4: r = t, g = p, b = v; break;
+                case 5: r = v, g = p, b = q; break;
+            }
+            return {
+                r: Math.round(r * 255),
+                g: Math.round(g * 255),
+                b: Math.round(b * 255)
+            };
+        }
+
+        var golden_ratio_conjugate = 0.618033988749895
+        var h = Math.random();
+        // /\
+
+        var svgmap = document.getElementById('svgcontainer');
+        var simple_svgmap = document.getElementById('simple_svgcontainer');
+
+        var simple_svg_str = "";
+
+        var bounding_box = [[0, 0], [0, 0]];
+
+        var number = /-?[0-9]*\.?[0-9]+(?:e[-+]?\d+)?/ig;
+        var length = { a: 7, c: 6, h: 1, l: 2, m: 2, q: 4, s: 4, t: 2, v: 1, z: 0 };
+        var segment = /([astvzqmhlc])([^astvzqmhlc]*)/ig;
+        var single_segment = /M(.*?)Z/ig;
+
+        function parseValues(args) {
+            var numbers = args.match(number)
+            return numbers ? numbers.map(Number) : []
+        }
+
+        function parsePath(path) {
+            var data = []
+            path.replace(segment, function (_, command, args) {
+                var type = command.toLowerCase()
+                args = parseValues(args)
+
+                // overloaded moveTo
+                if (type == 'm' && args.length > 2) {
+                    data.push([command].concat(args.splice(0, 2)))
+                    type = 'l'
+                    command = command == 'm' ? 'l' : 'L'
+                }
+
+                while (true) {
+                    if (args.length == length[type]) {
+                        args.unshift(command)
+                        return data.push(args)
+                    }
+                    if (args.length < length[type]) throw new Error('malformed path data')
+                    data.push([command].concat(args.splice(0, length[type])))
+                }
+            })
+            return data
+        }
+
+        function donwload_vmf() {
+            var solidStr = "";
+            var parser = new DOMParser();
+            var doc = parser.parseFromString(simple_svg_str, "application/xml");
+            var paths = doc.getElementsByTagName("path");
+
+            //TODO: Find a better way to differentiate? Maybe run CanvasDraw & Imagetracer for each type seperately to better discern them?
+            var colorArr = { "rgb(255,0,0)": "wall", "rgb(255,255,255)": "floor" };
+
+            for (var i = 0; i < paths.length; i++) {
+                var color = paths[i].getAttribute('fill');
+
+                //Ignore Background/Void
+                if (color == "rgb(0,0,0)") {
+                    continue;
+                }
+
+                var color = paths[i].getAttribute('fill');
+                var type = colorArr[color];
+
+                var path = paths[i].getAttribute('d');
+
+                var re = new RegExp(single_segment);
+
+                var matches = path.match(re);
+
+                var multi_coords = [];
+
+                for (var k = 0; k < matches.length; k++) {
+                    var parsed = parsePath(matches[k]);
+
+                    //console.log(parsed);
+
+                    multi_coords.push([]);
+
+                    //Center and rescale vertices
+                    for (var j = 0; j < parsed.length - 1; j++) {
+                        var scaled_x = ((((parsed[j][1] / bounding_box[1][0]) * 2) - 1) * 4000.0);
+                        scaled_x = Math.round(scaled_x * 100) / 100;
+
+                        var scaled_y = ((((parsed[j][2] / bounding_box[1][1]) * 2) - 1) * 4000.0);
+                        scaled_y = Math.round(scaled_y * 100) / 100;
+
+                        multi_coords[k].push([scaled_x, scaled_y]);
+                    }
+                }
+
+                var data = earcut.flatten(multi_coords);
+                var triangles = earcut(data.vertices, data.holes, data.dimensions);
+
+                for (var j = 0; j < triangles.length; j += 3) {
+                    console.log("### New Brush ###")
+
+                    var offset_top = (type == "wall" ? 128 : 0);
+                    var offset_bot = (type == "wall" ? 0 : -64);
+
+                    var v1_t = [data.vertices[triangles[j] * 2], data.vertices[triangles[j] * 2 + 1], 0];
+                    v1_t[2] += offset_top;
+                    var v2_t = [data.vertices[triangles[j + 1] * 2], data.vertices[triangles[j + 1] * 2 + 1], 0];
+                    v2_t[2] += offset_top;
+                    var v3_t = [data.vertices[triangles[j + 2] * 2], data.vertices[triangles[j + 2] * 2 + 1], 0];
+                    v3_t[2] += offset_top;
+
+                    var v1_b = [data.vertices[triangles[j] * 2], data.vertices[triangles[j] * 2 + 1], 0];
+                    v1_b[2] += offset_bot;
+
+                    var v2_b = [data.vertices[triangles[j + 1] * 2], data.vertices[triangles[j + 1] * 2 + 1], 0];
+                    v2_b[2] += offset_bot;
+
+                    var v3_b = [data.vertices[triangles[j + 2] * 2], data.vertices[triangles[j + 2] * 2 + 1], 0];
+                    v3_b[2] += offset_bot;
+
+                    var triangles_to_place = [
+                        // Top
+                        // 1, 2, 3
+                        [v1_t, v2_t, v3_t],
+                        // Bottom
+                        // 5, 4, 6
+                        [v2_b, v1_b, v3_b],
+                        // Side 1
+                        // 1, 4, 5
+                        [v1_t, v1_b, v2_b],
+                        // Side 2
+                        // 2, 5, 6
+                        [v2_t, v2_b, v3_b],
+                        // Side 3
+                        // 3, 6, 4
+                        [v3_t, v3_b, v1_b]
+                    ];
+
+                    //console.table(triangles_to_place);
+
+                    solidStr += "\tsolid\n";
+
+                    solidStr += "\t{\n";
+
+                    for (var m = 0; m < triangles_to_place.length; m++) {
+                        var t0 = triangles_to_place[m][1];
+                        var t1 = triangles_to_place[m][0];
+                        var t2 = triangles_to_place[m][2];
+
+                        solidStr += "\t\tside\n";
+                        solidStr += "\t\t{\n";
+                        solidStr += "\t\t\t\"plane\" \"(" + t0[0] + " " + t0[1] + " " + t0[2] + ") (" + t1[0] + " " + t1[1] + " " + t1[2] + ") (" + t2[0] + " " + t2[1] + " " + t2[2] + ")\"\n";
+
+                        if (type == "wall") {
+                            solidStr += "\t\t\t\"material\" \"DEV/DEV_MEASUREGENERIC01B\"\n";
+                        } else {
+                            solidStr += "\t\t\t\"material\" \"DEV/DEV_MEASUREGENERIC01\"\n";
+                        }
+
+
+                        if (m < 2) {
+                            solidStr += "\t\t\t\"uaxis\" \"[1 0 0 0] 0.25\"\n";
+                            solidStr += "\t\t\t\"vaxis\" \"[0 -1 0 0] 0.25\"\n";
+                        }
+                        else {
+                            solidStr += "\t\t\t\"uaxis\" \"[0 1 0 0] 0.25\"\n";
+                            solidStr += "\t\t\t\"vaxis\" \"[0 0 -1 0] 0.25\"\n";
+                        }
+
+                        solidStr += "\t\t}\n";
+                    }
+
+                    solidStr += "\t}\n";
+                }
+            }
+
+            var vmfString = "world {\n";
+            vmfString += solidStr;
+            vmfString += "}";
+
+            var element = document.createElement('a');
+            element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(vmfString));
+            element.setAttribute('download', "generated_map.vmf");
+
+            element.style.display = 'none';
+            document.body.appendChild(element);
+
+            element.click();
+
+            document.body.removeChild(element);
+        }
+
+        function simplify_svg(tracedata) {
+            var pointcnt = 0, newpointscontainer = [];
+
+            for (var i = 0; i < tracedata.layers.length; i++) {
+                newpointscontainer[i] = [];
+                for (var j = 0; j < tracedata.layers[i].length; j++) {
+                    newpointscontainer[i][j] = [];
+                    newpointscontainer[i][j].push({ x: tracedata.layers[i][j].segments[0].x1, y: tracedata.layers[i][j].segments[0].y1 });
+                    for (var k = 0; k < tracedata.layers[i][j].segments.length; k++) {
+                        newpointscontainer[i][j].push({ x: tracedata.layers[i][j].segments[k].x2, y: tracedata.layers[i][j].segments[k].y2 });
+                        pointcnt++;
+                        if (tracedata.layers[i][j].segments[k].hasOwnProperty('x3')) {
+                            newpointscontainer[i][j].push({ x: tracedata.layers[i][j].segments[k].x3, y: tracedata.layers[i][j].segments[k].y3 });
+                            pointcnt++;
+                        }
+                    }
+                    // simplify with tolerance = 2 ; highQuality = true
+                    newpointscontainer[i][j] = simplify(newpointscontainer[i][j], 2, true);
+                }
+            }
+            pointcnt = 0;
+            for (var i = 0; i < tracedata.layers.length; i++) {
+                for (var j = 0; j < tracedata.layers[i].length; j++) {
+                    tracedata.layers[i][j].segments = [];
+                    pointcnt += newpointscontainer[i][j].length;
+                    for (var k = 0; k < newpointscontainer[i][j].length; k++) {
+                        tracedata.layers[i][j].segments.push(
+                            {
+                                type: 'L',
+                                x1: newpointscontainer[i][j][k].x,
+                                y1: newpointscontainer[i][j][k].y,
+                                x2: newpointscontainer[i][j][(k + 1) % newpointscontainer[i][j].length].x,
+                                y2: newpointscontainer[i][j][(k + 1) % newpointscontainer[i][j].length].y
+                            }
+                        );
+
+                    }
+                }
+            }
+            return tracedata;
+        }
+
+        function createSVGFromCanvas(colors_used) {
+            var options = { ltres: 0, qtres: 0, pathomit: 0, colorquantcycles: 1 };
+
+            options.pal = colors_used;
+
+            var tracedata = ImageTracer.imagedataToTracedata(ImageTracer.getImgdata(pixelmap), options);
+
+            var svg_string = ImageTracer.getsvgstring(tracedata, options);
+
+            svgmap.innerHTML = svg_string;
+
+            simple_svg_str = svg_string;
+
+
+            /*var simple_tracedata = simplify_svg(tracedata, options);
+            simple_svg_str = ImageTracer.getsvgstring(simple_tracedata, options);
+
+            simple_svgmap.innerHTML = simple_svg_str;*/
+        }
+
+        function handleFileContents(contents) {
+            var data = JSON.parse(contents);
+
+            var colors_to_use = { "floor": [0, 255, 0], "wall": [255, 0, 0], "segment": [255, 255, 255] };
+
+            var colors_used = [{ r: 0, g: 0, b: 0, a: 255 }];
+
+            var size = data["size"];
+            pixelctx.width = size.x / data["pixelSize"];
+            pixelctx.height = size.y / data["pixelSize"];
+
+            var widthRatio = pixelmap_width / pixelctx.width;
+            var heightRatio = pixelmap_height / pixelctx.height;
+
+            for (var i = data["layers"].length-1; i >= 0; i--) {
+                // += 2 because X Y
+                var pixels = data["layers"][i]["pixels"];
+
+                if (data["layers"][i]["type"] != "segment" && data["layers"][i]["type"] != "wall") {
+                    continue;
+                }
+
+                var color = colors_to_use[data["layers"][i]["type"]]
+
+                pixelctx.fillStyle = "rgb(" + color[0] + ", " + color[1] + ", " + color[2] + ")";
+                colors_used.push({ r: color[0], g: color[1], b: color[2], a: 255 });
+
+                for (var k = 0; k < pixels.length; k += 2) {
+                    var x = pixels[k];
+                    var y = pixels[k + 1];
+
+                    bounding_box[0][0] = Math.min(bounding_box[0][0], x);
+                    bounding_box[0][1] = Math.min(bounding_box[0][1], y);
+
+                    bounding_box[1][0] = Math.max(bounding_box[1][0], x);
+                    bounding_box[1][1] = Math.max(bounding_box[1][1], y);
+
+                    pixelctx.fillRect(x * widthRatio, y * heightRatio, 1, 1);
+                }
+            }
+
+            /*for (var i = 0; i < data["entities"].length; i++) {
+                // += 2 because X Y
+                var entity = data["entities"][i];
+                var points = entity["points"];
+ 
+                if(entity["type"] != "no_go_area") {
+                    continue;
+                }
+ 
+                h += golden_ratio_conjugate;
+                h %= 1;
+                var {r, g, b} = HSVtoRGB(h, 0.99, 0.99)
+ 
+                pixelctx.fillStyle = "rgba(" + r + ", " + g + ", " + b + ", 0.8)";
+ 
+                pixelctx.beginPath();
+ 
+                pixelctx.moveTo(points[0] * widthRatio / data["pixelSize"], points[1] * heightRatio / data["pixelSize"]);
+ 
+                for (var k = 2; k < points.length; k += 2) {
+                    var x = points[k];
+                    var y = points[k + 1];
+ 
+                    pixelctx.lineTo(x * widthRatio / data["pixelSize"], y * heightRatio / data["pixelSize"]);
+                }
+ 
+                pixelctx.closePath();
+                pixelctx.fill();
+            }*/
+
+            //Make colors_used unique
+            colors_used = colors_used.filter((v, i, a) => a.findIndex(t => (JSON.stringify(t) === JSON.stringify(v))) === i);
+
+            console.log(data);
+            console.log(bounding_box);
+
+            createSVGFromCanvas(colors_used);
+
+            //Unlock downloadbutton
+            var dlbtn = document.getElementById("download_vmf_btn");
+            dlbtn.disabled = false;
+
+            dlbtn.addEventListener('click', donwload_vmf, false);
+        }
+
+        function handleFileSelect(evt) {
+            var file = evt.target.files[0];
+
+            var reader = new FileReader();
+
+            reader.readAsText(file);
+
+            reader.onload = function () {
+                handleFileContents(reader.result);
+            }
+        }
+
+
+        document.getElementById('inputmap').addEventListener('change', handleFileSelect, false);
+    </script>
+</body>
+
+</html>
